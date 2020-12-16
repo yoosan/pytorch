@@ -147,7 +147,11 @@ inline at::Tensor IValue::toTensor() && {
   clearToNone();
   return result;
 }
-inline at::Tensor IValue::toTensor() const& {
+inline at::Tensor& IValue::toTensor() & {
+  AT_ASSERT(isTensor(), "Expected Tensor but got ", tagKind());
+  return payload.as_tensor;
+}
+inline const at::Tensor& IValue::toTensor() const& {
   AT_ASSERT(isTensor(), "Expected Tensor but got ", tagKind());
   return payload.as_tensor;
 }
@@ -757,6 +761,7 @@ inline const ivalue::Object& IValue::toObjectRef() const {
   inline type IValue::to<type>() const& {  \
     return this->method_name();            \
   }
+
 DEFINE_TO(at::Tensor, toTensor)
 DEFINE_TO(c10::Stream, toStream)
 DEFINE_TO(float, toDouble)
