@@ -7,6 +7,7 @@ import torch.nn.quantized.dynamic as nnqd
 from torch.fx import GraphModule  # type: ignore
 from torch.fx import map_arg  # type: ignore
 from torch.fx.graph import Graph
+from torch.quantization._numeric_suite import get_logger_dict, Shadow, ShadowLogger
 from torch.quantization.fx.quantize import _remove_qconfig, is_activation_post_process
 
 
@@ -86,7 +87,7 @@ def compare_weights_fx(float_dict, quantized_dict):
         quantized_model = convert_fx(prepared_model)
 
         qmodel = quantized_model
-        wt_compare_dict = compare_weights(backup_prepared_model.state_dict(), qmodel.state_dict())
+        wt_compare_dict = compare_weights_fx(backup_prepared_model.state_dict(), qmodel.state_dict())
         for key in wt_compare_dict:
             print(key, compute_error(wt_compare_dict[key]['float'], wt_compare_dict[key]['quantized'].dequantize()))
 
@@ -137,3 +138,88 @@ def compare_weights_fx(float_dict, quantized_dict):
                 )
 
     return weight_dict
+
+
+def prepare_model_with_stubs_fx(float_module, q_module, module_swap_list, Logger):
+    r"""Prepare the model by attaching the float module to its matching quantized
+    module as the shadow if the float module type is in module_swap_list.
+
+    Example usage:
+        prepare_model_with_stubs_fx(float_model, q_model, module_swap_list, Logger)
+        q_model(data)
+        ob_dict = get_logger_dict(q_model)
+
+    Args:
+        float_module: float module used to generate the q_module
+        q_module: module quantized from float_module
+        module_swap_list: list of float module types to attach the shadow
+        Logger: type of logger to be used in shadow module to process the outputs of
+            quantized module and its float shadow module
+    """
+    torch._C._log_api_usage_once(
+        "quantization_api._numeric_suite.prepare_model_with_stubs_fx"
+    )
+
+    float_module_children = {}
+    for name, mod in float_module.named_children():
+        float_module_children[name] = mod
+
+    reassign = {}
+    for name, mod in q_module.named_children():
+        if name not in float_module_children:
+            continue
+
+        float_mod = float_module_children[name]
+
+        if type(float_mod) not in module_swap_list:
+            prepare_model_with_stubs_fx(float_mod, mod, module_swap_list, Logger)
+
+        if type(float_mod) in module_swap_list:
+            reassign[name] = Shadow(mod, float_mod, Logger)
+
+    for key, value in reassign.items():
+        q_module._modules[key] = value
+
+
+def compare_model_stub_fx(
+    float_model, q_model, module_swap_list, *data, Logger=ShadowLogger
+):
+    r"""Compare quantized module in a model with its floating point counterpart,
+    feeding both of them the same input. Return a dict with key corresponding to
+    module names and each entry being a dictionary with two keys 'float' and
+    'quantized', containing the output tensors of quantized and its matching
+    float shadow module. This dict can be used to compare and compute the module
+    level quantization error.
+
+    This function first call prepare_model_with_stubs_fx() to swap the quantized
+    module that we want to compare with the Shadow module, which takes quantized
+    module, corresponding float module and logger as input, and creates a forward
+    path inside to make the float module to shadow quantized module sharing the
+    same input. The logger can be customizable, default logger is ShadowLogger
+    and it will save the outputs of the quantized module and float module that
+    can be used to compute the module level quantization error.
+
+    Example usage:
+        module_swap_list = [nn.Linear]
+        ob_dict = compare_model_stub_fx(float_model,qmodel,module_swap_list, data)
+        for key in ob_dict:
+            print(key, compute_error(ob_dict[key]['float'], ob_dict[key]['quantized'].dequantize()))
+
+    Args:
+        float_model: float model used to generate the q_model
+        q_model: model quantized from float_model
+        module_swap_list: list of float module types at which shadow modules will
+            be attached.
+        data: input data used to run the prepared q_model
+        Logger: type of logger to be used in shadow module to process the outputs of
+            quantized module and its float shadow module
+    """
+    torch._C._log_api_usage_once(
+        "quantization_api._numeric_suite.compare_model_stub_fx"
+    )
+
+    float_model = remove_qconfig_observer_fx(float_model)
+    prepare_model_with_stubs_fx(float_model, q_model, module_swap_list, Logger)
+    q_model(*data)
+    ob_dict = get_logger_dict(q_model)
+    return ob_dict
