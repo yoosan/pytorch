@@ -2,8 +2,6 @@ from tools.codegen.model import *
 
 from tools.codegen.api.types import *
 import tools.codegen.api.cpp as cpp
-import tools.codegen.api.native as native
-import tools.codegen.local as local
 
 import itertools
 from typing import Sequence, Optional, Tuple, List, Union
@@ -28,17 +26,11 @@ from typing import Sequence, Optional, Tuple, List, Union
 #
 
 def argumenttype_type(t: Type, *, mutable: bool) -> str:
-    if local.use_c10_dispatcher().dispatcher_uses_new_style():
-        # This is a faux amis.  If it makes sense in the future to add
-        # more special cases here, or invert things so cpp.argument_type
-        # calls this, or just completely inline the function, please do
-        # it.
-        return cpp.argumenttype_type(t, mutable=mutable)
-    else:
-        # This is real sharing.  If you're modifying this path, ask
-        # yourself why you are changing the native functions protocol
-        # here and not in native.
-        return native.argumenttype_type(t, mutable=mutable)
+    # This is a faux amis.  If it makes sense in the future to add
+    # more special cases here, or invert things so cpp.argument_type
+    # calls this, or just completely inline the function, please do
+    # it.
+    return cpp.argumenttype_type(t, mutable=mutable)
 
 def argument_type(a: Argument) -> str:
     return argumenttype_type(a.type, mutable=a.is_write)
@@ -48,36 +40,21 @@ def returns_type(rs: Sequence[Return]) -> str:
     return cpp.returns_type(rs)
 
 def argument(a: Argument) -> DispatcherArgument:
-    if local.use_c10_dispatcher().dispatcher_uses_new_style():
-        return DispatcherArgument(
-            type=argument_type(a),
-            name=a.name,
-            argument=a,
-        )
-    else:
-        la = native.argument(a)
-        assert len(la) == 1, "Operators using the legacy signature in the dispatcher don't scatter TensorOptions."
-        return DispatcherArgument(
-            type=la[0].type,
-            name=la[0].name,
-            argument=la[0].argument,
-        )
+    return DispatcherArgument(
+        type=argument_type(a),
+        name=a.name,
+        argument=a,
+    )
 
 def name(func: FunctionSchema) -> str:
     return cpp.name(func)
 
 def arguments(func: FunctionSchema) -> Tuple[DispatcherArgument, ...]:
-    if local.use_c10_dispatcher().dispatcher_uses_new_style():
-        return tuple(map(argument, itertools.chain(
-            func.arguments.flat_positional,
-            func.arguments.flat_kwarg_only,
-            func.arguments.out
-        )))
-    else:
-        return tuple(
-            DispatcherArgument(type=la.type, name=la.name, argument=la.argument)
-            for la in native.arguments(func)
-        )
+    return tuple(map(argument, itertools.chain(
+        func.arguments.flat_positional,
+        func.arguments.flat_kwarg_only,
+        func.arguments.out
+    )))
 
 # Given a set of CppArguments in scope, return a sequence of dispatcher
 # expressions that translate the cpp API into dispatcher API
@@ -93,23 +70,17 @@ def cppargument_exprs(
 ) -> Sequence[DispatcherExpr]:
     if isinstance(a, CppSingleArgumentPack):
         if isinstance(a.this.argument, TensorOptionsArguments):
-            if local.use_c10_dispatcher().dispatcher_uses_new_style():
-                # Scatter
-                ta = a.this.argument
-                name = a.this.name
-                return [
-                    DispatcherExpr(type=argument_type(ta.dtype), expr=f'optTypeMetaToScalarType({name}.dtype_opt())'),
-                    DispatcherExpr(type=argument_type(ta.layout), expr=f'{name}.layout_opt()'),
-                    DispatcherExpr(type=argument_type(ta.device), expr=f'{name}.device_opt()'),
-                    DispatcherExpr(type=argument_type(ta.pin_memory), expr=f'{name}.pinned_memory_opt()'),  # weird discrep
-                ]
-            else:
-                # No-op
-                return [DispatcherExpr(type='const TensorOptions &', expr=a.this.name)]
+            # Scatter
+            ta = a.this.argument
+            name = a.this.name
+            return [
+                DispatcherExpr(type=argument_type(ta.dtype), expr=f'optTypeMetaToScalarType({name}.dtype_opt())'),
+                DispatcherExpr(type=argument_type(ta.layout), expr=f'{name}.layout_opt()'),
+                DispatcherExpr(type=argument_type(ta.device), expr=f'{name}.device_opt()'),
+                DispatcherExpr(type=argument_type(ta.pin_memory), expr=f'{name}.pinned_memory_opt()'),  # weird discrep
+            ]
         elif isinstance(a.this.argument, Argument):
-            if a.this.name == 'memory_format' and \
-                    tensor_options is not None and \
-                    local.use_c10_dispatcher().dispatcher_uses_new_style():
+            if a.this.name == 'memory_format' and tensor_options is not None:
                 return [DispatcherExpr(
                     type=argument_type(a.this.argument),
                     expr=f'c10::impl::check_tensor_options_and_extract_memory_format({tensor_options.name}, {a.this.name})')
@@ -119,20 +90,11 @@ def cppargument_exprs(
         else:
             assert_never(a.this.argument)
     elif isinstance(a, CppTensorOptionsArgumentPack):
-        if local.use_c10_dispatcher().dispatcher_uses_new_style():
-            # No-op
-            return [
-                expr
-                for sub_a in a.explicit_arguments()  # NB: don't really care about explicitness here
-                for expr in cppargument_exprs(CppSingleArgumentPack(sub_a), tensor_options=tensor_options)
-            ]
-        else:
-            # Gather
-            return [DispatcherExpr(
-                type='const TensorOptions &',
-                expr=f'TensorOptions().dtype({a.dtype.name}).layout({a.layout.name})'
-                     f'.device({a.device.name}).pinned_memory({a.pin_memory.name})',
-            )]
+        return [
+            expr
+            for sub_a in a.explicit_arguments()  # NB: don't really care about explicitness here
+            for expr in cppargument_exprs(CppSingleArgumentPack(sub_a), tensor_options=tensor_options)
+        ]
     elif isinstance(a, CppThisArgumentPack):
         return [DispatcherExpr(
             type=a.type,
@@ -142,15 +104,9 @@ def cppargument_exprs(
         assert_never(a)
 
 def cpparguments_exprs(func: FunctionSchema, * , method: bool, api_is_faithful: bool) -> Sequence[DispatcherExpr]:
-    dispatcher_is_faithful = local.use_c10_dispatcher().dispatcher_uses_new_style()
-
     arguments: List[Union[Argument, TensorOptionsArguments, SelfArgument]] = []
-    if dispatcher_is_faithful:
-        arguments.extend(func.arguments.non_out)
-        arguments.extend(func.arguments.out)
-    else:
-        arguments.extend(func.arguments.out)
-        arguments.extend(func.arguments.non_out)
+    arguments.extend(func.arguments.non_out)
+    arguments.extend(func.arguments.out)
 
     if api_is_faithful:
         argument_packs = tuple(
