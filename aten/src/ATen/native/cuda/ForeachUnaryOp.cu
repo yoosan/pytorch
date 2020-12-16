@@ -3,7 +3,6 @@
 #include <ATen/native/cuda/ForeachFunctors.cuh>
 
 namespace at { namespace native {
-
 template <template<class> class Op>
 std::vector<Tensor> floating_complex_half(TensorList tensors) {
     std::vector<std::vector<at::Tensor>> tensor_lists;
@@ -212,18 +211,22 @@ struct NAME1 {                                                           \
                                                                          \
 std::vector<Tensor> foreach_tensor_##NAME##_cuda(TensorList tensors) {   \
     check_foreach_api_restrictions(tensors);                             \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow(tensors);              \
-    }                                                                   \
+    bool has_integral = has_int_or_bool_tensor(tensors);                 \
+        /* MTA doesnt support different return type than input one */    \
+        if (!can_use_fast_route(tensors) || has_integral) {              \
+            return at::native::foreach_tensor_##NAME##_slow(tensors);    \
+        }                                                                \
                                                                          \
     return floating_complex_half<NAME1>(tensors);                        \
 }                                                                        \
                                                                          \
 void foreach_tensor_##NAME##_cuda_(TensorList tensors) {                 \
     check_foreach_api_restrictions(tensors);                             \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow_(tensors);              \
-    }                                                                   \
+    bool has_integral = has_int_or_bool_tensor(tensors);                 \
+    /* MTA doesnt support different return type than input one */        \
+    if (!can_use_fast_route(tensors) || has_integral) {                  \
+        return at::native::foreach_tensor_##NAME##_slow_(tensors);       \
+    }                                                                    \
                                                                          \
     floating_complex_half_<NAME1>(tensors);                              \
 }
@@ -236,39 +239,47 @@ struct NAME1 {                                                           \
                                                                          \
 std::vector<Tensor> foreach_tensor_##NAME##_cuda(TensorList tensors) {   \
     check_foreach_api_restrictions(tensors);                             \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow(tensors);              \
-    }                                                                   \
+    bool has_integral = has_int_or_bool_tensor(tensors);                 \
+    /* MTA doesnt support different return type than input one */        \
+    if (!can_use_fast_route(tensors) || has_integral) {                  \
+        return at::native::foreach_tensor_##NAME##_slow(tensors);        \
+    }                                                                    \
     return floating_complex_half_bfloat16<NAME1>(tensors);               \
 }                                                                        \
                                                                          \
 void foreach_tensor_##NAME##_cuda_(TensorList tensors) {                 \
     check_foreach_api_restrictions(tensors);                             \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow_(tensors);              \
-    }                                                                   \
+    bool has_integral = has_int_or_bool_tensor(tensors);                 \
+    /* MTA doesnt support different return type than input one */        \
+    if (!can_use_fast_route(tensors) || has_integral) {                  \
+        return at::native::foreach_tensor_##NAME##_slow_(tensors);       \
+    }                                                                    \
     floating_complex_half_bfloat16_<NAME1>(tensors);                     \
 }
 
 #define FLOATING_HALF_BFLOAT16(NAME, NAME1)                             \
 std::vector<Tensor> foreach_tensor_##NAME##_cuda(TensorList tensors) {  \
     check_foreach_api_restrictions(tensors);                            \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow(tensors);              \
+    bool has_integral = has_int_or_bool_tensor(tensors);                \
+    /* MTA doesnt support different return type than input one */       \
+    if (!can_use_fast_route(tensors) || has_integral) {                 \
+        return at::native::foreach_tensor_##NAME##_slow(tensors);       \
     }                                                                   \
     return floating_half_bfloat16<NAME1>(tensors);                      \
 }                                                                       \
                                                                         \
 void foreach_tensor_##NAME##_cuda_(TensorList tensors) {                \
     check_foreach_api_restrictions(tensors);                            \
-    if (!can_use_fast_route(tensors)) {                                 \
-        at::native::foreach_tensor_##NAME##_slow_(tensors);             \
+    bool has_integral = has_int_or_bool_tensor(tensors);                \
+    /* MTA doesnt support different return type than input one */       \
+    if (!can_use_fast_route(tensors) || has_integral) {                 \
+        return at::native::foreach_tensor_##NAME##_slow_(tensors);      \
     }                                                                   \
                                                                         \
     floating_half_bfloat16_<NAME1>(tensors);                            \
 }
 
-#define FLOATING_HALF(NAME, NAME1)                                                 \
+#define FLOATING_HALF(NAME, NAME1, SUPPORTS_COMPLEX, SUPPORTS_INT)                 \
 template<typename T>                                                               \
 struct NAME1 {                                                                     \
     __device__ T operator()(T t) const { return std::NAME(t); }                    \
@@ -276,29 +287,54 @@ struct NAME1 {                                                                  
                                                                                    \
 std::vector<Tensor> foreach_tensor_##NAME##_cuda(TensorList tensors) {             \
     check_foreach_api_restrictions(tensors);                                       \
-    if (!can_use_fast_route(tensors)) {                                            \
-        return at::native::foreach_tensor_##NAME##_slow(tensors);                  \
+    if (!SUPPORTS_COMPLEX) {                                                       \
+        TORCH_CHECK(!tensors[0].is_complex(), "Not supported for complex inputs"); \
     }                                                                              \
                                                                                    \
+    if (!SUPPORTS_INT) {                                                           \
+        bool has_integral = has_int_or_bool_tensor(tensors);                       \
+        /* MTA doesnt support different return type than input one */              \
+        if (!can_use_fast_route(tensors) || has_integral) {                        \
+            return at::native::foreach_tensor_##NAME##_slow(tensors);              \
+        }                                                                          \
+    }                                                                              \
+    else {                                                                         \
+        if (!can_use_fast_route(tensors)) {                                        \
+            return at::native::foreach_tensor_##NAME##_slow(tensors);              \
+        }                                                                          \
+    }                                                                              \
                                                                                    \
     return floating_half<NAME1>(tensors);                                          \
 }                                                                                  \
                                                                                    \
 void foreach_tensor_##NAME##_cuda_(TensorList tensors) {                           \
     check_foreach_api_restrictions(tensors);                                       \
-    if (!can_use_fast_route(tensors)) {                                            \
-        at::native::foreach_tensor_##NAME##_slow_(tensors);                        \
+    if (!SUPPORTS_COMPLEX) {                                                       \
+        TORCH_CHECK(!tensors[0].is_complex(), "Not supported for complex inputs"); \
+    }                                                                              \
+                                                                                   \
+    if (!SUPPORTS_INT) {                                                           \
+        bool has_integral = has_int_or_bool_tensor(tensors);                       \
+        /* MTA doesnt support different return type than input one */              \
+        if (!can_use_fast_route(tensors) || has_integral) {                        \
+            return at::native::foreach_tensor_##NAME##_slow_(tensors);             \
+        }                                                                          \
+    }                                                                              \
+    else {                                                                         \
+        if (!can_use_fast_route(tensors)) {                                        \
+            return at::native::foreach_tensor_##NAME##_slow_(tensors);             \
+        }                                                                          \
     }                                                                              \
                                                                                    \
     floating_half_<NAME1>(tensors);                                                \
 }
 
-FLOATING_HALF(erfc, Erfc);
-FLOATING_HALF(expm1, Expm1);
-FLOATING_HALF(lgamma, Lgamma);
-FLOATING_HALF(trunc, Truncf);
-FLOATING_HALF(floor, Floor);
-FLOATING_HALF(ceil, Ceil);
+FLOATING_HALF(erfc, Erfc, true, false);
+FLOATING_HALF(expm1, Expm1, true, false);
+FLOATING_HALF(lgamma, Lgamma, true, false);
+FLOATING_HALF(trunc, Truncf, false, true);
+FLOATING_HALF(floor, Floor, false, true);
+FLOATING_HALF(ceil, Ceil, false, true);
 
 template<typename T>
 struct Log1p {
