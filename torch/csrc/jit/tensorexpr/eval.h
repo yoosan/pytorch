@@ -830,12 +830,15 @@ class SimpleIREvaluator : public CodeGen, public IRVisitor {
 
   TORCH_API void visit(const Intrinsics* v) override {
     auto ty = v->dtype().scalar_type();
-    if (ty == ScalarType::Float) {
-      visit_intrinsics_helper<float>(v);
-    } else if (ty == ScalarType::Double) {
-      visit_intrinsics_helper<double>(v);
-    } else {
-      throw unsupported_dtype();
+    switch (ty) {
+#define TYPE_CASE(Type, Name)         \
+  case ScalarType::Name:              \
+    visit_intrinsics_helper<Type>(v); \
+    break;
+      AT_FORALL_SCALAR_TYPES(TYPE_CASE);
+#undef TYPE_CASE
+      default:
+        throw unsupported_dtype();
     }
   }
 
@@ -921,8 +924,12 @@ class SimpleIREvaluator : public CodeGen, public IRVisitor {
         return std::tanh(v);
       case kExp:
         return std::exp(v);
-      case kFabs:
-        return std::fabs(v);
+      case kAbs: {
+        // internal tool complains about calling `abs` on unsigned types,
+        // the following contraption makes the tool happy
+        using X = std::conditional_t<std::is_unsigned<T>::value, int, T>;
+        return std::is_unsigned<T>::value ? v : std::abs(static_cast<X>(v));
+      }
       case kExpm1:
         return std::expm1(v);
       case kLog:
@@ -951,9 +958,11 @@ class SimpleIREvaluator : public CodeGen, public IRVisitor {
         return std::trunc(v);
       case kLgamma:
         return std::lgamma(v);
-      case kFrac:
-        T intpart;
+      case kFrac: {
+        using X = std::conditional_t<std::is_integral<T>::value, float, T>;
+        X intpart;
         return std::modf(v, &intpart);
+      }
       default:
         throw std::runtime_error("Invalid op_type: " + c10::to_string(op_type));
     }
